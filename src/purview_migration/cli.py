@@ -11,6 +11,8 @@ from purview_migration.models import MigrationManifest
 from purview_migration.relink import build_relink_plan
 from purview_migration.relink_executor import apply_relink_plan
 from purview_migration.report_generator import export_report
+from purview_migration.script_generator import generate_permission_scripts
+from purview_migration.validator import validate_completeness
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,6 +75,37 @@ def build_parser() -> argparse.ArgumentParser:
     relink_apply_parser.add_argument(
         "--report-output",
         help="Path to export status report grouped by outcome",
+    )
+
+    validate_parser = subparsers.add_parser(
+        "validate",
+        help="Validate manifest completeness before account deletion",
+    )
+    validate_parser.add_argument("--input", required=True, help="Input manifest JSON path")
+    validate_parser.add_argument(
+        "--output",
+        help="Optional output path for validation report JSON",
+    )
+
+    generate_scripts_parser = subparsers.add_parser(
+        "generate-scripts",
+        help="Generate permission and linkage scripts for restoration",
+    )
+    generate_scripts_parser.add_argument("--input", required=True, help="Input manifest JSON path")
+    generate_scripts_parser.add_argument(
+        "--new-account-name",
+        required=True,
+        help="Name of the new Purview account to create",
+    )
+    generate_scripts_parser.add_argument(
+        "--subscription-id",
+        required=True,
+        help="Azure subscription ID for new account",
+    )
+    generate_scripts_parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory to write generated scripts",
     )
 
     return parser
@@ -143,6 +176,56 @@ def main() -> None:
                     "plan_output": args.output,
                     "report_output": args.report_output,
                     "result": result.as_dict(),
+                },
+                indent=2,
+            )
+        )
+        return
+
+    if args.command == "validate":
+        data = read_json(args.input)
+        manifest_dict = {"artifacts": data}  # Wrap for validator
+        report = validate_completeness(manifest_dict)
+        
+        if args.output:
+            write_json(args.output, report)
+        
+        print(json.dumps(report, indent=2))
+        
+        # Exit with non-zero if validation failed
+        if not report["deletion_ready"]:
+            sys.exit(1)
+        return
+
+    if args.command == "generate-scripts":
+        import os
+        from pathlib import Path
+        
+        data = read_json(args.input)
+        manifest_dict = {"artifacts": data}
+        
+        scripts = generate_permission_scripts(
+            manifest_dict,
+            args.new_account_name,
+            args.subscription_id,
+        )
+        
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        files_created = []
+        for filename, content in scripts.items():
+            file_path = output_dir / filename
+            file_path.write_text(content, encoding="utf-8")
+            files_created.append(str(file_path))
+        
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "output_dir": str(output_dir),
+                    "files_created": files_created,
+                    "message": "Scripts generated successfully. Review RESTORATION_GUIDE.md for step-by-step instructions.",
                 },
                 indent=2,
             )

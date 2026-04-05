@@ -16,6 +16,50 @@ When migrating to Azure Data Landing Zones or consolidating Purview instances, t
 
 Supports both command-line execution and Microsoft Fabric Lakehouse notebooks for integration with data engineering workflows.
 
+## Use Cases
+
+### Scenario 1: Side-by-Side Tenant Migration
+Migrate from one Purview account to another (different tenants or subscriptions):
+- Source and target accounts exist simultaneously
+- No downtime required
+- Gradual cutover possible
+
+### Scenario 2: Delete & Recreate (This Account)
+**⚠️ DESTRUCTIVE OPERATION** - Backup and restore when you must delete your current Purview account before creating a new one:
+- Complete backup with validation before deletion
+- Generate restoration scripts for permissions and linkages
+- Structured restoration workflow with verification steps
+- **See: [DELETE-AND-RECREATE-WORKFLOW.md](examples/DELETE-AND-RECREATE-WORKFLOW.md) for detailed guide**
+
+Key commands for delete & recreate:
+```bash
+# 1. Export everything
+purview-migrate export --source-account current-account --output backup.json
+
+# 2. Validate completeness before deletion
+purview-migrate validate --input backup.json
+
+# 3. Generate restoration scripts
+purview-migrate generate-scripts \
+  --input backup.json \
+  --new-account-name new-account \
+  --subscription-id <sub-id> \
+  --output-dir scripts/
+
+# 4. DELETE old account (point of no return!)
+az purview account delete --name current-account --yes
+
+# 5. Create new account
+az purview account create --name new-account ...
+
+# 6. Restore from backup
+purview-migrate import --target-account new-account --input backup.json --apply
+purview-migrate relink-apply --target-account new-account --input relink-plan.json --apply
+
+# 7. Run generated permission scripts
+bash scripts/permissions.sh
+```
+
 ## Features
 
 ### Artifact Coverage
@@ -199,6 +243,81 @@ purview-migrate relink-apply \
   --report-output manifests/report.csv \
   --apply
 ```
+
+### `purview-migrate validate`
+
+Validate manifest completeness before account deletion.
+
+**⚠️ Use Case**: Before deleting a Purview account, verify all critical artifacts have been captured.
+
+**Required Arguments**:
+- `--input` - Input manifest JSON path
+
+**Optional Arguments**:
+- `--output` - Output path for validation report JSON
+
+**Example**:
+```bash
+purview-migrate validate \
+  --input manifests/pre-deletion-backup.json \
+  --output manifests/validation-report.json
+```
+
+**Output Structure**:
+```json
+{
+  "validation_status": "PASS",
+  "deletion_ready": true,
+  "critical_checks": [
+    {"name": "collections", "captured": 15, "status": "OK"}
+  ],
+  "warnings": ["⚠ 5 scan credentials captured as references only"],
+  "manual_steps_required": [
+    {
+      "category": "Managed Identity Permissions",
+      "action": "Grant new managed identity permissions to data sources",
+      "automation": "Script generation available"
+    }
+  ],
+  "summary": {
+    "total_collections": 15,
+    "total_data_sources": 28,
+    "manual_steps_count": 4
+  }
+}
+```
+
+**Exit Codes**:
+- `0` - Validation passed, safe to delete
+- `1` - Validation failed, DO NOT delete
+
+### `purview-migrate generate-scripts`
+
+Generate permission and linkage scripts for account restoration.
+
+**⚠️ Use Case**: After account recreation, automate permission grants, Key Vault linkage, and dependency configuration.
+
+**Required Arguments**:
+- `--input` - Input manifest JSON path
+- `--new-account-name` - Name of the new Purview account
+- `--subscription-id` - Azure subscription ID
+- `--output-dir` - Directory to write generated scripts
+
+**Example**:
+```bash
+purview-migrate generate-scripts \
+  --input manifests/pre-deletion-backup.json \
+  --new-account-name my-new-purview \
+  --subscription-id 12345678-1234-1234-1234-123456789012 \
+  --output-dir scripts/
+```
+
+**Generated Files**:
+- `RESTORATION_GUIDE.md` - Step-by-step restoration instructions
+- `permissions.sh` - Azure CLI script to grant managed identity permissions to data sources
+- `permissions.ps1` - PowerShell version of permission grants
+- `link-keyvault.sh` - Key Vault linkage script
+- `private-endpoint.arm.json` - ARM template for private endpoint recreation
 
 ---
 
