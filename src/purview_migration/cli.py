@@ -10,6 +10,7 @@ from purview_migration.io_utils import read_json, write_json
 from purview_migration.models import MigrationManifest
 from purview_migration.relink import build_relink_plan
 from purview_migration.relink_executor import apply_relink_plan
+from purview_migration.report_generator import export_report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,6 +57,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help="Perform writes. If omitted, execution runs in dry-run mode.",
+    )
+    relink_apply_parser.add_argument(
+        "--max-entity-validation",
+        type=int,
+        default=2000,
+        help="Maximum number of entities to validate in target account",
+    )
+    relink_apply_parser.add_argument(
+        "--report-format",
+        choices=["json", "csv"],
+        default="json",
+        help="Report export format (json or csv)",
+    )
+    relink_apply_parser.add_argument(
+        "--report-output",
+        help="Path to export status report grouped by outcome",
     )
 
     return parser
@@ -108,15 +125,23 @@ def main() -> None:
 
     if args.command == "relink-apply":
         plan = read_json(args.input)
-        result = apply_relink_plan(args.target_account, plan, dry_run=not args.apply)
+        result = apply_relink_plan(
+            args.target_account,
+            plan,
+            dry_run=not args.apply,
+            max_entity_validation=args.max_entity_validation,
+        )
         if args.output:
             write_json(args.output, plan)
+        if args.report_output:
+            export_report(plan, args.report_output, format_type=args.report_format)
         print(
             json.dumps(
                 {
                     "status": "ok",
                     "mode": "apply" if args.apply else "dry-run",
-                    "output": args.output,
+                    "plan_output": args.output,
+                    "report_output": args.report_output,
                     "result": result.as_dict(),
                 },
                 indent=2,

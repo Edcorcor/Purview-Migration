@@ -6,7 +6,9 @@ from purview_migration.client import PurviewClient
 from purview_migration.models import RelinkResult
 
 
-def apply_relink_plan(target_account: str, plan: dict[str, Any], dry_run: bool = True) -> RelinkResult:
+def apply_relink_plan(
+    target_account: str, plan: dict[str, Any], dry_run: bool = True, max_entity_validation: int = 2000
+) -> RelinkResult:
     client = PurviewClient(target_account)
     result = RelinkResult()
 
@@ -18,7 +20,7 @@ def apply_relink_plan(target_account: str, plan: dict[str, Any], dry_run: bool =
     _apply_classifications(client, plan, result, dry_run)
     _apply_scan_rulesets(client, plan, result, dry_run)
     _apply_scan_credentials(client, plan, result, dry_run)
-    _validate_entities(client, plan, result)
+    _validate_entities(client, plan, result, max_entities=max_entity_validation)
 
     if dry_run:
         result.warnings.append("Dry-run mode enabled. No writes were performed.")
@@ -255,11 +257,10 @@ def _apply_scan_credentials(client: PurviewClient, plan: dict[str, Any], result:
             result.warnings.append(f"Credential relink failed for {target_name}: {exc}")
 
 
-def _validate_entities(client: PurviewClient, plan: dict[str, Any], result: RelinkResult) -> None:
+def _validate_entities(client: PurviewClient, plan: dict[str, Any], result: RelinkResult, max_entities: int = 2000) -> None:
     existing_qns: set[str] = set()
     offset = 0
     limit = 100
-    max_entities = 2000
 
     while offset < max_entities:
         batch = client.search_entities(limit=limit, offset=offset)

@@ -92,6 +92,24 @@ purview-migrate relink-apply \
   --apply
 ```
 
+Add entity validation and report export:
+
+```bash
+purview-migrate relink-apply \
+  --target-account <target-purview-account-name> \
+  --input manifests/relink-plan.json \
+  --output manifests/relink-status.json \
+  --max-entity-validation 5000 \
+  --report-format csv \
+  --report-output manifests/relink-report.csv \
+  --apply
+```
+
+**Options:**
+- `--max-entity-validation`: Maximum number of entities to validate against target (default 2000; increase for large estates with >2000 assets)
+- `--report-format`: Export report as `csv` or `json` (default json)
+- `--report-output`: Path to save grouped status report (by outcome: linked, created, missing, failed, unresolved)
+
 `relink-apply` currently performs full create/link logic for collections, data sources, scans, glossary categories/terms, classifications, rulesets, and credentials.
 Entity relink remains validation-only and marks unresolved qualified names for follow-up (for example, re-scan in target).
 

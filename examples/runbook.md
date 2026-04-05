@@ -43,10 +43,16 @@ purview-migrate relink --input manifests/source-export.json --output manifests/r
 purview-migrate relink-apply --target-account <target-account> --input manifests/relink-plan.json --output manifests/relink-status.json
 ```
 
-## 8. Apply relink execution
+## 8. Apply relink execution with entity validation and reporting
 
 ```powershell
-purview-migrate relink-apply --target-account <target-account> --input manifests/relink-plan.json --output manifests/relink-status.json --apply
+purview-migrate relink-apply --target-account <target-account> --input manifests/relink-plan.json --output manifests/relink-status.json --max-entity-validation 5000 --report-format csv --report-output manifests/relink-report.csv --apply
 ```
 
-Use `manifests/relink-status.json` to review unresolved entities and run additional scans or manual mapping updates.
+## 9. Review relink status report
+
+Open the generated report:
+- `manifests/relink-status.json` — updated plan with per-item status (dry-run or after apply)
+- `manifests/relink-report.csv` — grouped by outcome for quick triage of unresolved/failed items
+
+Use the report to hand off unresolved entities and failures to data engineering or governance teams.
