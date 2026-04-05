@@ -1,0 +1,6 @@
+Using Folder C:\Users\edcorcor\VSCode\Purview Migration
+Using Python
+I have to migrate my Azure Tenant's Microsoft Purview Data Governance to an Azure Data Landing Zone. Anything that will not persist at the Tenant level needs to be migrated. This will include assets and collections, along with scans and anything else. 
+What I want to do is use Python to enumerate everything in the current tenant, and then after migration, recreate everything in the new instance. This means that assets in Data products, assets with data quality scans, data governance domains that are mapped to specific collections in the data maps, all of it must be relinked up or recreated. 
+Basically, I want to new Purview Artifact 
+I  
