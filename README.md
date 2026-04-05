@@ -7,37 +7,54 @@ A comprehensive Python toolkit for migrating Microsoft Purview Data Governance a
 
 ## Overview
 
-When migrating to Azure Data Landing Zones or consolidating Purview instances, tenant-level artifacts (collections, scans, glossaries, classifications) must be recreated. This toolkit automates the entire migration workflow:
+**⚠️ Critical Constraint: Only ONE Purview Data Governance account can exist at a time in your Azure environment.**
 
-1. **Export** - Enumerate all artifacts from source Purview account
-2. **Import** - Recreate artifacts in target Purview account  
-3. **Relink** - Validate and reconnect relationships between artifacts
-4. **Report** - Generate detailed status reports grouped by outcome
+When migrating to Azure Data Landing Zones or recreating Purview accounts, you must **delete the existing account before creating a new one**. All tenant-level artifacts (collections, data sources, scans, glossaries, classifications, data products, data quality rules) will be lost unless backed up first.
+
+This toolkit solves that problem by automating the complete backup-delete-restore workflow:
+
+1. **Export** - Capture all metadata from your current Purview account
+2. **Validate** - Verify completeness before deletion (with exit codes for safety)
+3. **Generate Scripts** - Auto-create permission grants and dependency linkage scripts
+4. **Delete & Recreate** - Remove old account, create new account (manual Azure CLI steps)
+5. **Import** - Restore all artifacts to the new account
+6. **Relink** - Reconnect relationships between collections, scans, glossary terms, data products, and data quality rules
+7. **Report** - Generate detailed status reports for verification
 
 Supports both command-line execution and Microsoft Fabric Lakehouse notebooks for integration with data engineering workflows.
 
-## Use Cases
+## The Problem This Solves
 
-### Scenario 1: Side-by-Side Tenant Migration
-Migrate from one Purview account to another (different tenants or subscriptions):
-- Source and target accounts exist simultaneously
-- No downtime required
-- Gradual cutover possible
+**You cannot have two Purview Data Governance accounts simultaneously.** When you need to:
+- Migrate to an Azure Data Landing Zone architecture
+- Change Purview account names or regions
+- Consolidate governance across tenants
+- Recover from configuration issues
 
-### Scenario 2: Delete & Recreate (This Account)
-**⚠️ DESTRUCTIVE OPERATION** - Backup and restore when you must delete your current Purview account before creating a new one:
-- Complete backup with validation before deletion
-- Generate restoration scripts for permissions and linkages
-- Structured restoration workflow with verification steps
-- **See: [DELETE-AND-RECREATE-WORKFLOW.md](examples/DELETE-AND-RECREATE-WORKFLOW.md) for detailed guide**
+You must:
+You must:
+1. Export ALL metadata first (or lose it permanently)
+2. Delete the old Purview account
+3. Create the new Purview account
+4. Restore ALL metadata to the new account
+5. Relink data sources, scans, data products, data quality rules, and Key Vault credentials
 
-Key commands for delete & recreate:
+**Without this toolkit, you'd lose:** Collections, data source registrations, scan configurations, business glossary, custom classifications, scan rulesets, scan credentials, data products, data quality rules, and all relationships between them.
+
+## Complete Workflow
+
 ```bash
-# 1. Export everything
-purview-migrate export --source-account current-account --output backup.json
+# 1. Export everything from current account
+purview-migrate export \
+  --source-account current-account \
+  --output backup.json \
+  --max-entities 10000
 
-# 2. Validate completeness before deletion
-purview-migrate validate --input backup.json
+# 2. Validate completeness (MUST PASS before deletion!)
+purview-migrate validate \
+  --input backup.json \
+  --output validation.json
+# Exit code 0 = safe to delete, Exit code 1 = DO NOT DELETE
 
 # 3. Generate restoration scripts
 purview-migrate generate-scripts \
@@ -46,21 +63,50 @@ purview-migrate generate-scripts \
   --subscription-id <sub-id> \
   --output-dir scripts/
 
-# 4. DELETE old account (point of no return!)
-az purview account delete --name current-account --yes
+# ⚠️ POINT OF NO RETURN ⚠️
+# 4. Delete old account (cannot be undone!)
+az purview account delete --name current-account --resource-group <rg> --yes
 
 # 5. Create new account
-az purview account create --name new-account ...
+az purview account create \
+  --name new-account \
+  --resource-group <rg> \
+  --location <location> \
+  --managed-resource-group-name <mrg-name>
 
-# 6. Restore from backup
-purview-migrate import --target-account new-account --input backup.json --apply
-purview-migrate relink-apply --target-account new-account --input relink-plan.json --apply
+# 6. Restore all metadata
+purview-migrate import \
+  --target-account new-account \
+  --input backup.json \
+  --apply
 
-# 7. Run generated permission scripts
+# 7. Relink artifacts and validate
+purview-migrate relink \
+  --input backup.json \
+  --output relink-plan.json
+
+purview-migrate relink-apply \
+  --target-account new-account \
+  --input relink-plan.json \
+  --apply \
+  --report-output report.csv
+
+# 8. Grant managed identity permissions to data sources
 bash scripts/permissions.sh
+
+# 9. Link Key Vault for scan credentials
+bash scripts/link-keyvault.sh
+
+# 10. Recreate scan credentials in Purview Portal
+# (Secrets cannot be exported, must be manually reconfigured)
+
+# 11. Test scans and verify data products/data quality rules
 ```
 
-## Features
+**📖 Detailed Guide:** [DELETE-AND-RECREATE-WORKFLOW.md](examples/DELETE-AND-RECREATE-WORKFLOW.md)  
+**✅ Pre-Flight Checklist:** [PRE-FLIGHT-CHECKLIST.md](docs/PRE-FLIGHT-CHECKLIST.md)
+
+## What Gets Migrated
 
 ### Artifact Coverage
 
@@ -71,18 +117,29 @@ bash scripts/permissions.sh
 - ✅ **Glossary Terms** - Business glossary term definitions and relationships
 - ✅ **Classification Definitions** - Custom classification schemas
 - ✅ **Scan Rulesets** - Custom scan rule configurations
-- ✅ **Scan Credentials** - Credential references (secrets managed separately)
+- ✅ **Scan Credentials** - Credential references (secrets managed separately in Key Vault)
 - ✅ **Entity Snapshot** - Data map asset inventory for validation
+- ⚠️ **Data Products** - Captured via entity relationships (requires manual verification)
+- ⚠️ **Data Quality Rules** - Captured via scan configurations (requires relinking to data sources)
+
+### What Requires Manual Steps
+
+- **Scan Credential Secrets** - Key Vault secrets cannot be exported; must be recreated in Portal
+- **Managed Identity Permissions** - New account needs RBAC grants (automated via generated scripts)
+- **Integration Runtimes** - Self-hosted IR must be reconfigured on host machines
+- **Private Endpoints** - Network connections must be recreated (ARM templates generated)
+- **Key Vault Linkage** - Connection to Key Vault must be reestablished (script generated)
 
 ### Capabilities
 
+- **Validation Before Deletion** - Exit codes prevent deletion if backup incomplete
+- **Script Generation** - Auto-create permission grants, Key Vault linkage, ARM templates
 - **Dry-Run Mode** - Validate all operations before applying changes
-- **Incremental Import** - Skip existing artifacts, update only what changed
-- **Automated Relinking** - Reconnect collections, scans, and glossary relationships
-- **Entity Validation** - Verify data assets exist in target (configurable limit)
-- **Status Reporting** - Export JSON/CSV reports grouped by outcome
-- **Error Resilience** - Continue on failures, log warnings for review
-- **Fabric Integration** - Jupyter notebook for Lakehouse-based execution
+- **Automated Relinking** - Reconnect collections, scans, glossary terms, data products, and data quality rules
+- **Entity Validation** - Verify data assets exist after restoration (configurable limit)
+- **Status Reporting** - Export JSON/CSV reports grouped by outcome (linked/created/missing/failed)
+- **Error Resilience** - Continue on failures, accumulate warnings for review
+- **Fabric Integration** - Jupyter notebook for Lakehouse-based execution with NotebookUtils
 
 ## Important notes
 
@@ -93,9 +150,12 @@ bash scripts/permissions.sh
 ## Prerequisites
 
 - Python 3.10+
-- Access to source and target Purview accounts
-- RBAC permissions in both accounts
-- Azure CLI login (`az login`) or managed identity / service principal available to `DefaultAzureCredential`
+- Access to current Purview account with read permissions
+- RBAC permissions to delete and create Purview accounts (Owner or Contributor on resource group)
+- RBAC permissions on data sources for managed identity grants after recreation
+- Access to Key Vault(s) containing scan credential secrets
+- Azure CLI installed and authenticated (`az login`)
+- DefaultAzureCredential authentication available (Azure CLI, managed identity, or service principal)
 
 ## Quickstart
 
@@ -116,35 +176,67 @@ purview-migrate --help
 ### Basic Usage
 
 ```bash
-# 1. Export source artifacts
+# 1. Export current account artifacts
 purview-migrate export \
-  --source-account source-purview \
-  --output manifests/export.json
+  --source-account current-purview \
+  --output manifests/backup.json \
+  --max-entities 10000
 
-# 2. Import to target (dry-run first)
-purview-migrate import \
-  --target-account target-purview \
-  --input manifests/export.json
+# 2. Validate backup completeness (CRITICAL!)
+purview-migrate validate \
+  --input manifests/backup.json \
+  --output manifests/validation.json
+# Must exit with code 0 (PASS) before proceeding to deletion!
 
-# 3. Apply import
+# 3. Generate restoration scripts
+purview-migrate generate-scripts \
+  --input manifests/backup.json \
+  --new-account-name new-purview \
+  --subscription-id <your-subscription-id> \
+  --output-dir scripts/
+
+# ⚠️ POINT OF NO RETURN - Verify backup before proceeding! ⚠️
+
+# 4. Delete old account
+az purview account delete \
+  --name current-purview \
+  --resource-group <resource-group> \
+  --yes
+
+# 5. Create new account
+az purview account create \
+  --name new-purview \
+  --resource-group <resource-group> \
+  --location <location> \
+  --managed-resource-group-name <mrg-name>
+
+# 6. Import all metadata
 purview-migrate import \
-  --target-account target-purview \
-  --input manifests/export.json \
+  --target-account new-purview \
+  --input manifests/backup.json \
   --apply
 
-# 4. Generate relink plan
+# 7. Generate and apply relink plan
 purview-migrate relink \
-  --input manifests/export.json \
+  --input manifests/backup.json \
   --output manifests/relink-plan.json
 
-# 5. Execute relink with reports
 purview-migrate relink-apply \
-  --target-account target-purview \
+  --target-account new-purview \
   --input manifests/relink-plan.json \
-  --output manifests/relink-status.json \
+  --apply \
   --report-format csv \
-  --report-output manifests/report.csv \
-  --apply
+  --report-output manifests/report.csv
+
+# 8. Grant managed identity permissions
+bash scripts/permissions.sh
+
+# 9. Link Key Vault
+bash scripts/link-keyvault.sh
+
+# 10. Manually recreate scan credentials in Purview Portal
+# - Management Center → Credentials → Create new
+# - Link to Key Vault secrets (secrets cannot be exported)
 ```
 
 ## CLI Reference
@@ -344,25 +436,41 @@ For Fabric Lakehouse environments, use the included Jupyter notebook:
 
 See [examples/runbook.md](examples/runbook.md) for detailed step-by-step instructions.
 
-## Suggested Workflow
+## Recommended Workflow
 
-### Command Line
+### Command Line (Delete & Recreate)
 
-1. **Export** source account artifacts to JSON manifest
-2. **Review** manifest for warnings and artifact counts
-3. **Import** (dry-run) to validate target compatibility
-4. **Import** (apply) to create artifacts in target
-5. **Generate** relink plan (edit target names if needed)
-6. **Relink** (dry-run) to validate mappings
-7. **Relink** (apply) to create/link missing artifacts
-8. **Report** export for unresolved items handoff
+**⚠️ Remember: Only ONE Purview account can exist at a time**
 
-### Fabric Notebook
+1. **Export** - Capture all metadata from current account
+2. **Validate** - Verify backup completeness (exit code 0 = safe to delete)
+3. **Generate Scripts** - Create permission grants and linkage automation
+4. **Review** - Check validation report, warnings, manual steps required
+5. **Backup** - Store manifest in multiple secure locations (Git, storage account)
+6. **Delete** - Remove old Purview account (⚠️ POINT OF NO RETURN)
+7. **Create** - Provision new Purview account (wait for "Succeeded" status)
+8. **Import** - Restore all artifacts to new account
+9. **Relink** - Reconnect relationships between artifacts
+10. **Permissions** - Grant managed identity access to data sources (run generated scripts)
+11. **Key Vault** - Link Key Vault for scan credentials
+12. **Credentials** - Manually recreate scan credentials in Portal (secrets cannot be exported)
+13. **Test** - Run test scans on representative data sources
+14. **Verify** - Check data products, data quality rules, lineage
+15. **Cutover** - Enable scheduled scans, update external references
 
-1. Configure source/target account names and execution flags
-2. Run all cells to execute complete workflow
-3. Review reports in Lakehouse Files area
-4. Use CSV reports for triage of unresolved/failed items
+### Fabric Notebook (Delete & Recreate)
+
+**Note:** Fabric notebook handles the same delete-and-recreate workflow as CLI
+
+1. Edit configuration cell with current and new Purview account names
+2. Set execution flags (RUN_EXPORT, RUN_VALIDATE, etc.)
+3. Run export and validation cells first
+4. Review validation report - ensure deletion_ready = true
+5. **Manually delete and recreate account via Azure Portal or CLI**
+6. Run import and relink cells to restore metadata
+7. Review reports in Lakehouse Files area (`/lakehouse/default/Files/purview_migration/`)
+8. Use CSV reports for triage of unresolved/failed items
+9. Complete manual steps (permissions, credentials, Key Vault linkage)
 
 ## Status Reports
 
