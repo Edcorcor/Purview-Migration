@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+*.log
+manifests/*.json
+!manifests/.gitkeep
