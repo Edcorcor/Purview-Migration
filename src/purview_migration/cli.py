@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
+from typing import Any
 
 from purview_migration.exporter import export_manifest
 from purview_migration.importer import import_manifest
 from purview_migration.io_utils import read_json, write_json
+from purview_migration.lakehouse_export import package_manifest_for_lakehouse
 from purview_migration.models import MigrationManifest
 from purview_migration.relink import build_relink_plan
 from purview_migration.relink_executor import apply_relink_plan
@@ -30,6 +33,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2000,
         help="Maximum number of entities to export via search snapshot",
+    )
+    export_parser.add_argument(
+        "--lakehouse-output-dir",
+        help="Optional output directory for Lakehouse JSON, table files, semantic model, and report spec",
+    )
+    export_parser.add_argument(
+        "--no-table-exports",
+        action="store_true",
+        help="Skip table CSV generation when using --lakehouse-output-dir",
+    )
+    export_parser.add_argument(
+        "--no-semantic-report",
+        action="store_true",
+        help="Skip semantic model/report artifact generation when using --lakehouse-output-dir",
     )
 
     import_parser = subparsers.add_parser("import", help="Import artifacts into target Purview account")
@@ -108,129 +125,201 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory to write generated scripts",
     )
 
+    lakehouse_parser = subparsers.add_parser(
+        "lakehouse-package",
+        help="Create Lakehouse JSON files, table exports, and semantic/report artifacts from a manifest",
+    )
+    lakehouse_parser.add_argument("--input", required=True, help="Input manifest JSON path")
+    lakehouse_parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory to write Lakehouse package files",
+    )
+    lakehouse_parser.add_argument(
+        "--no-table-exports",
+        action="store_true",
+        help="Skip table CSV generation",
+    )
+    lakehouse_parser.add_argument(
+        "--no-semantic-report",
+        action="store_true",
+        help="Skip semantic model and report artifact generation",
+    )
+
     return parser
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    handlers = {
+        "export": _handle_export,
+        "lakehouse-package": _handle_lakehouse_package,
+        "import": _handle_import,
+        "relink": _handle_relink,
+        "relink-apply": _handle_relink_apply,
+        "validate": _handle_validate,
+        "generate-scripts": _handle_generate_scripts,
+    }
 
-    if args.command == "export":
-        manifest = export_manifest(args.source_account, max_entities=args.max_entities)
-        write_json(args.output, manifest.to_dict())
-        print(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "output": args.output,
-                    "warnings": manifest.warnings,
-                    "counts": {
-                        "collections": len(manifest.collections),
-                        "dataSources": len(manifest.data_sources),
-                        "scans": sum(len(x) for x in manifest.scans_by_source.values()),
-                        "glossaryCategories": len(manifest.glossary_categories),
-                        "glossaryTerms": len(manifest.glossary_terms),
-                        "classifications": len(manifest.classifications),
-                        "scanRulesets": len(manifest.scan_rulesets),
-                        "scanCredentials": len(manifest.scan_credentials),
-                        "entities": len(manifest.entities),
-                    },
-                },
-                indent=2,
-            )
-        )
-        return
+    handler = handlers.get(args.command)
+    if not handler:
+        print("Unknown command", file=sys.stderr)
+        sys.exit(2)
 
-    if args.command == "import":
-        data = read_json(args.input)
-        manifest = MigrationManifest.from_dict(data)
-        result = import_manifest(args.target_account, manifest, dry_run=not args.apply)
-        print(json.dumps({"status": "ok", "result": result.as_dict()}, indent=2))
-        return
+    handler(args)
 
-    if args.command == "relink":
-        data = read_json(args.input)
-        manifest = MigrationManifest.from_dict(data)
-        plan = build_relink_plan(manifest)
-        write_json(args.output, plan)
-        print(json.dumps({"status": "ok", "output": args.output, "summary": plan["summary"]}, indent=2))
-        return
 
-    if args.command == "relink-apply":
-        plan = read_json(args.input)
-        result = apply_relink_plan(
-            args.target_account,
-            plan,
-            dry_run=not args.apply,
-            max_entity_validation=args.max_entity_validation,
-        )
-        if args.output:
-            write_json(args.output, plan)
-        if args.report_output:
-            export_report(plan, args.report_output, format_type=args.report_format)
-        print(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "mode": "apply" if args.apply else "dry-run",
-                    "plan_output": args.output,
-                    "report_output": args.report_output,
-                    "result": result.as_dict(),
-                },
-                indent=2,
-            )
-        )
-        return
+def _normalize_manifest_document(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Accept either a full manifest document or a raw artifacts object.
 
-    if args.command == "validate":
-        data = read_json(args.input)
-        manifest_dict = {"artifacts": data}  # Wrap for validator
-        report = validate_completeness(manifest_dict)
-        
-        if args.output:
-            write_json(args.output, report)
-        
-        print(json.dumps(report, indent=2))
-        
-        # Exit with non-zero if validation failed
-        if not report["deletion_ready"]:
-            sys.exit(1)
-        return
+    Some workflows pass the whole manifest shape:
+    {
+      "metadata": ...,
+      "artifacts": ...,
+      "warnings": ...
+    }
+    while others may pass just the artifacts object. Normalize both here.
+    """
+    if "artifacts" in data:
+        return data
 
-    if args.command == "generate-scripts":
-        import os
-        from pathlib import Path
-        
-        data = read_json(args.input)
-        manifest_dict = {"artifacts": data}
-        
-        scripts = generate_permission_scripts(
+    return {
+        "metadata": {},
+        "artifacts": data,
+        "warnings": [],
+    }
+
+
+def _handle_export(args: argparse.Namespace) -> None:
+    manifest = export_manifest(args.source_account, max_entities=args.max_entities)
+    manifest_dict = manifest.to_dict()
+    write_json(args.output, manifest_dict)
+
+    lakehouse_outputs = None
+    if args.lakehouse_output_dir:
+        lakehouse_outputs = package_manifest_for_lakehouse(
             manifest_dict,
-            args.new_account_name,
-            args.subscription_id,
+            args.lakehouse_output_dir,
+            include_tables=not args.no_table_exports,
+            include_semantic_model=not args.no_semantic_report,
         )
-        
-        output_dir = Path(args.output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        files_created = []
-        for filename, content in scripts.items():
-            file_path = output_dir / filename
-            file_path.write_text(content, encoding="utf-8")
-            files_created.append(str(file_path))
-        
-        print(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "output_dir": str(output_dir),
-                    "files_created": files_created,
-                    "message": "Scripts generated successfully. Review RESTORATION_GUIDE.md for step-by-step instructions.",
-                },
-                indent=2,
-            )
-        )
-        return
 
-    print("Unknown command", file=sys.stderr)
-    sys.exit(2)
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "output": args.output,
+                "lakehouse": lakehouse_outputs,
+                "warnings": manifest.warnings,
+                "counts": {
+                    "collections": len(manifest.collections),
+                    "dataSources": len(manifest.data_sources),
+                    "scans": sum(len(x) for x in manifest.scans_by_source.values()),
+                    "glossaryCategories": len(manifest.glossary_categories),
+                    "glossaryTerms": len(manifest.glossary_terms),
+                    "classifications": len(manifest.classifications),
+                    "scanRulesets": len(manifest.scan_rulesets),
+                    "scanCredentials": len(manifest.scan_credentials),
+                    "entities": len(manifest.entities),
+                },
+            },
+            indent=2,
+        )
+    )
+
+
+def _handle_lakehouse_package(args: argparse.Namespace) -> None:
+    manifest_data = _normalize_manifest_document(read_json(args.input))
+    outputs = package_manifest_for_lakehouse(
+        manifest_data,
+        args.output_dir,
+        include_tables=not args.no_table_exports,
+        include_semantic_model=not args.no_semantic_report,
+    )
+    print(json.dumps({"status": "ok", "input": args.input, "lakehouse": outputs}, indent=2))
+
+
+def _handle_import(args: argparse.Namespace) -> None:
+    manifest = MigrationManifest.from_dict(_normalize_manifest_document(read_json(args.input)))
+    result = import_manifest(args.target_account, manifest, dry_run=not args.apply)
+    print(json.dumps({"status": "ok", "result": result.as_dict()}, indent=2))
+
+
+def _handle_relink(args: argparse.Namespace) -> None:
+    manifest = MigrationManifest.from_dict(_normalize_manifest_document(read_json(args.input)))
+    plan = build_relink_plan(manifest)
+    write_json(args.output, plan)
+    print(json.dumps({"status": "ok", "output": args.output, "summary": plan["summary"]}, indent=2))
+
+
+def _handle_relink_apply(args: argparse.Namespace) -> None:
+    plan = read_json(args.input)
+    result = apply_relink_plan(
+        args.target_account,
+        plan,
+        dry_run=not args.apply,
+        max_entity_validation=args.max_entity_validation,
+    )
+
+    if args.output:
+        write_json(args.output, plan)
+    if args.report_output:
+        export_report(plan, args.report_output, format_type=args.report_format)
+
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "mode": "apply" if args.apply else "dry-run",
+                "plan_output": args.output,
+                "report_output": args.report_output,
+                "result": result.as_dict(),
+            },
+            indent=2,
+        )
+    )
+
+
+def _handle_validate(args: argparse.Namespace) -> None:
+    manifest_dict = _normalize_manifest_document(read_json(args.input))
+    report = validate_completeness(manifest_dict)
+
+    if args.output:
+        write_json(args.output, report)
+
+    print(json.dumps(report, indent=2))
+
+    if not report["deletion_ready"]:
+        sys.exit(1)
+
+
+def _handle_generate_scripts(args: argparse.Namespace) -> None:
+    manifest_dict = _normalize_manifest_document(read_json(args.input))
+    scripts = generate_permission_scripts(
+        manifest_dict,
+        args.new_account_name,
+        args.subscription_id,
+    )
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    files_created: list[str] = []
+    for filename, content in scripts.items():
+        file_path = output_dir / filename
+        file_path.write_text(content, encoding="utf-8")
+        files_created.append(str(file_path))
+
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "output_dir": str(output_dir),
+                "files_created": files_created,
+                "message": "Scripts generated successfully. Review RESTORATION_GUIDE.md for step-by-step instructions.",
+            },
+            indent=2,
+        )
+    )

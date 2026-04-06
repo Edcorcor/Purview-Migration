@@ -5,6 +5,27 @@
 
 A comprehensive Python toolkit for migrating Microsoft Purview Data Governance artifacts between tenants and Azure Data Landing Zones. Supports export, import, automated relinking, and detailed status reporting with both CLI and Fabric Notebook interfaces.
 
+## Recent Updates (April 2026)
+
+- Added Lakehouse analytics packaging from export manifests:
+  - `json/` raw artifact files
+  - `tables/` CSV files for collections, data sources, scans, entities, and summary
+  - `semantic/` semantic model and report specification files
+- Added CLI support for direct Lakehouse packaging:
+  - `purview-migrate export --lakehouse-output-dir ...`
+  - `purview-migrate lakehouse-package --input ... --output-dir ...`
+- Expanded Fabric notebook workflow (`examples/purview_migration_fabric.ipynb`) with:
+  - Step 1b: Create managed Lakehouse Delta tables from generated CSV files
+  - Step 1c: Validate semantic model table bindings before reporting
+- Refactored internals for readability and maintainability:
+  - Command handlers split in CLI
+  - Import and relink builders simplified with shared helper patterns
+  - Script generator split into focused template builder functions
+  - Shared artifact key constants introduced
+- Added lightweight unit tests:
+  - `tests/test_script_generator.py`
+  - `tests/test_cli_helpers.py`
+
 ## Overview
 
 **⚠️ Critical Constraint: Only ONE Purview Data Governance account can exist at a time in your Azure environment.**
@@ -251,6 +272,9 @@ Export artifacts from source Purview account.
 
 **Optional Arguments**:
 - `--max-entities` - Maximum entities to export via search (default: 2000)
+- `--lakehouse-output-dir` - Optional directory for Lakehouse-ready outputs (JSON files, tables, semantic/report artifacts)
+- `--no-table-exports` - Skip table CSV exports when writing Lakehouse outputs
+- `--no-semantic-report` - Skip semantic model/report artifact generation when writing Lakehouse outputs
 
 **Example**:
 ```bash
@@ -258,6 +282,12 @@ purview-migrate export \
   --source-account my-source-purview \
   --output manifests/source-export.json \
   --max-entities 5000
+
+# Export + Lakehouse package (JSON + tables + semantic/report metadata)
+purview-migrate export \
+  --source-account my-source-purview \
+  --output manifests/source-export.json \
+  --lakehouse-output-dir manifests/lakehouse
 ```
 
 ### `purview-migrate import`
@@ -411,6 +441,34 @@ purview-migrate generate-scripts \
 - `link-keyvault.sh` - Key Vault linkage script
 - `private-endpoint.arm.json` - ARM template for private endpoint recreation
 
+### `purview-migrate lakehouse-package`
+
+Create a Lakehouse analytics package from an existing manifest JSON.
+
+**Use Case**: Keep raw JSON configs while also producing table files and semantic/report definitions for Fabric/Power BI analytics.
+
+**Required Arguments**:
+- `--input` - Input manifest JSON path
+- `--output-dir` - Directory to write Lakehouse package files
+
+**Optional Arguments**:
+- `--no-table-exports` - Skip table CSV exports
+- `--no-semantic-report` - Skip semantic model/report artifact generation
+
+**Example**:
+```bash
+purview-migrate lakehouse-package \
+  --input manifests/source-export.json \
+  --output-dir manifests/lakehouse
+```
+
+**Outputs**:
+- `json/` - One JSON file per artifact type (`collections.json`, `dataSources.json`, `entities.json`, etc.)
+- `tables/` - Table-ready CSVs (`collections.csv`, `dataSources.csv`, `scans.csv`, `entities.csv`, `artifact_summary.csv`)
+- `semantic/semantic_model.json` - Relationship-aware semantic model definition
+- `semantic/report_spec.json` - Suggested report layout (pages/visuals)
+- `semantic/capture_summary.json` and `semantic/capture_summary.md` - Coverage summary for audit/review
+
 ---
 
 ## Using with Microsoft Fabric
@@ -422,6 +480,8 @@ For Fabric Lakehouse environments, use the included Jupyter notebook:
 **Features**:
 - Complete workflow in single notebook
 - Stores all artifacts in Lakehouse Files area (`/lakehouse/default/Files/purview_migration/`)
+- Supports analytics-friendly table exports for assets, scans, collections, and related artifacts
+- Produces semantic model and report metadata files for quick Power BI/Fabric model setup
 - Uses NotebookUtils/mssparkutils for Fabric integration
 - User-configurable settings for dry-run/apply modes
 - Automatic directory structure and file management
@@ -528,6 +588,18 @@ Some Purview API endpoints vary by version. If export/import fails:
 - Check manifest warnings for specific endpoint errors
 - Extend `client.py` with version-specific handling
 - File issue with error details and Purview version
+
+## Testing
+
+Run unit tests from repository root:
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+Current test coverage includes:
+- script generation output and template content checks
+- CLI manifest normalization helper behavior
 
 ## Security
 

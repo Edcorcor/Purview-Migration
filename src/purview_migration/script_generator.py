@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
 def generate_permission_scripts(manifest: dict[str, Any], new_account_name: str, subscription_id: str) -> dict[str, str]:
-    """
-    Generate Azure CLI and PowerShell scripts to grant permissions after account recreation.
-    """
-    
+    """Generate post-recreation scripts for permissions, linkage, and restoration."""
+
     artifacts = manifest.get("artifacts", {})
-    scripts = {}
-    
-    # Generate managed identity permission script
     data_sources = artifacts.get("dataSources", [])
-    
-    azure_cli_permissions = f"""#!/bin/bash
+
+    return {
+        "permissions.sh": _build_permissions_sh(data_sources, new_account_name, subscription_id),
+        "permissions.ps1": _build_permissions_ps1(data_sources, new_account_name, subscription_id),
+        "link-keyvault.sh": _build_key_vault_script(new_account_name),
+        "private-endpoint.arm.json": json.dumps(_build_private_endpoint_template(new_account_name), indent=2),
+        "RESTORATION_GUIDE.md": _build_restoration_guide(new_account_name),
+    }
+
+
+def _build_permissions_sh(data_sources: list[dict[str, Any]], new_account_name: str, subscription_id: str) -> str:
+    script = f"""#!/bin/bash
 # Grant Purview Managed Identity permissions to data sources
 # Run this after creating the new Purview account: {new_account_name}
 
@@ -34,43 +40,39 @@ echo ""
 
 """
     
-    # Add permissions for each data source
     for idx, source in enumerate(data_sources, 1):
         source_name = source.get("name", f"source-{idx}")
         source_kind = source.get("kind", "Unknown")
-        properties = source.get("properties", {})
-        
-        # Try to extract resource information
-        resource_id = properties.get("resourceId") or properties.get("endpoint") or properties.get("serverEndpoint")
-        
+        resource_id = _resource_id(source)
+
         if resource_id:
-            azure_cli_permissions += f"""# Data Source {idx}: {source_name} ({source_kind})
+            script += f"""# Data Source {idx}: {source_name} ({source_kind})
 echo "Granting permissions for {source_name}..."
 
 """
             if "storage" in source_kind.lower() or "adls" in source_kind.lower():
-                azure_cli_permissions += f"""az role assignment create \\
+                script += f"""az role assignment create \\
   --role "Storage Blob Data Reader" \\
   --assignee $PURVIEW_PRINCIPAL_ID \\
   --scope "{resource_id}"
 
 """
             elif "sql" in source_kind.lower():
-                azure_cli_permissions += f"""# For SQL: Grant db_datareader role via T-SQL:
+                script += f"""# For SQL: Grant db_datareader role via T-SQL:
 # CREATE USER [{new_account_name}] FROM EXTERNAL PROVIDER;
 # ALTER ROLE db_datareader ADD MEMBER [{new_account_name}];
 
 """
-    
-    azure_cli_permissions += """
+
+    script += """
 echo "✓ Permission grants completed"
 echo "⚠ Review and grant SQL Server permissions manually using T-SQL commands above"
 """
-    
-    scripts["permissions.sh"] = azure_cli_permissions
-    
-    # PowerShell version
-    powershell_permissions = f"""# PowerShell script to grant Purview Managed Identity permissions
+    return script
+
+
+def _build_permissions_ps1(data_sources: list[dict[str, Any]], new_account_name: str, subscription_id: str) -> str:
+    script = f"""# PowerShell script to grant Purview Managed Identity permissions
 # Run this after creating the new Purview account: {new_account_name}
 
 $ErrorActionPreference = "Stop"
@@ -87,31 +89,30 @@ Write-Host "Purview Managed Identity: $principalId" -ForegroundColor Green
 Write-Host ""
 
 """
-    
+
     for idx, source in enumerate(data_sources, 1):
         source_name = source.get("name", f"source-{idx}")
         source_kind = source.get("kind", "Unknown")
-        properties = source.get("properties", {})
-        resource_id = properties.get("resourceId") or properties.get("endpoint")
-        
+        resource_id = _resource_id(source)
+
         if resource_id and ("storage" in source_kind.lower() or "adls" in source_kind.lower()):
-            powershell_permissions += f"""# Data Source {idx}: {source_name}
+            script += f"""# Data Source {idx}: {source_name}
 Write-Host "Granting Storage Blob Data Reader for {source_name}..." -ForegroundColor Cyan
 New-AzRoleAssignment -ObjectId $principalId `
   -RoleDefinitionName "Storage Blob Data Reader" `
   -Scope "{resource_id}"
 
 """
-    
-    powershell_permissions += """
+
+    script += """
 Write-Host "✓ Permission grants completed" -ForegroundColor Green
 Write-Host "⚠ Review and grant SQL Server permissions manually" -ForegroundColor Yellow
 """
-    
-    scripts["permissions.ps1"] = powershell_permissions
-    
-    # Generate Key Vault linkage script
-    key_vault_script = f"""#!/bin/bash
+    return script
+
+
+def _build_key_vault_script(new_account_name: str) -> str:
+    return f"""#!/bin/bash
 # Link Key Vault to new Purview account
 # Prerequisites: Key Vault must exist and contain scan credentials
 
@@ -138,30 +139,29 @@ az keyvault set-policy \\
 echo "✓ Key Vault permissions granted"
 echo "⚠ Complete Key Vault linkage in Purview Portal: Management > Credentials > Key Vault connections"
 """
-    
-    scripts["link-keyvault.sh"] = key_vault_script
-    
-    # Generate ARM template for private endpoints (if needed)
-    arm_template = {
+
+
+def _build_private_endpoint_template(new_account_name: str) -> dict[str, Any]:
+    return {
         "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
         "contentVersion": "1.0.0.0",
         "parameters": {
             "purviewAccountName": {
                 "type": "string",
-                "defaultValue": new_account_name
+                "defaultValue": new_account_name,
             },
             "privateEndpointName": {
                 "type": "string",
-                "defaultValue": f"{new_account_name}-pe"
+                "defaultValue": f"{new_account_name}-pe",
             },
             "vnetName": {
                 "type": "string",
-                "metadata": {"description": "Virtual Network name"}
+                "metadata": {"description": "Virtual Network name"},
             },
             "subnetName": {
                 "type": "string",
-                "metadata": {"description": "Subnet name for private endpoint"}
-            }
+                "metadata": {"description": "Subnet name for private endpoint"},
+            },
         },
         "resources": [
             {
@@ -171,27 +171,25 @@ echo "⚠ Complete Key Vault linkage in Purview Portal: Management > Credentials
                 "location": "[resourceGroup().location]",
                 "properties": {
                     "subnet": {
-                        "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnetName'))]"
+                        "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnetName'))]",
                     },
                     "privateLinkServiceConnections": [
                         {
                             "name": "[parameters('privateEndpointName')]",
                             "properties": {
                                 "privateLinkServiceId": "[resourceId('Microsoft.Purview/accounts', parameters('purviewAccountName'))]",
-                                "groupIds": ["account"]
-                            }
+                                "groupIds": ["account"],
+                            },
                         }
-                    ]
-                }
+                    ],
+                },
             }
-        ]
+        ],
     }
-    
-    import json
-    scripts["private-endpoint.arm.json"] = json.dumps(arm_template, indent=2)
-    
-    # Generate restoration order checklist
-    restoration_guide = f"""# Purview Account Recreation - Restoration Guide
+
+
+def _build_restoration_guide(new_account_name: str) -> str:
+    return f"""# Purview Account Recreation - Restoration Guide
 
 ## Prerequisites (Complete BEFORE creating new account)
 
@@ -308,7 +306,12 @@ If restoration fails:
 2. Old account configuration documented in validation report
 3. Can recreate in different region if needed
 """
-    
-    scripts["RESTORATION_GUIDE.md"] = restoration_guide
-    
-    return scripts
+
+
+def _resource_id(source: dict[str, Any]) -> str | None:
+    properties = source.get("properties", {})
+    return (
+        properties.get("resourceId")
+        or properties.get("endpoint")
+        or properties.get("serverEndpoint")
+    )
