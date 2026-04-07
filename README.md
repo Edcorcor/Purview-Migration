@@ -582,6 +582,25 @@ purview-migrate export --max-entities 10000 ...
 purview-migrate relink-apply --max-entity-validation 10000 ...
 ```
 
+### Azure SDK Import Errors
+
+If you encounter `ImportError: cannot import name 'AccessTokenInfo' from 'azure.core.credentials'`:
+
+This is typically a version compatibility issue in the Azure SDK ecosystem. The included notebook automatically handles this by upgrading Azure SDK packages before importing the toolkit. If running outside the notebook:
+
+```bash
+# Ensure compatible versions
+pip install --upgrade "azure-core>=1.28.0,<2.0.0" "azure-identity>=1.15.0,<2.0.0"
+
+# Then reinstall the toolkit
+pip install -e .
+```
+
+Compatible versions (verified):
+- `azure-core`: 1.28.0 - 1.x
+- `azure-identity`: 1.15.0 - 1.x
+- `requests`: 2.32.3+
+
 ### API Version Compatibility
 
 Some Purview API endpoints vary by version. If export/import fails:
